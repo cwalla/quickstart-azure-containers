@@ -240,9 +240,11 @@ The `initial-azure-setup.sh` script automates the complete Azure environment set
 
 #### Prerequisites for Setup Script
 - **Azure CLI** logged in (`az login`)
-- **GitHub CLI** (optional, for automatic secret creation)
+- **GitHub CLI** (required; the setup script uses `gh api` to resolve immutable GitHub OIDC subject IDs)
 - **Azure subscription** with appropriate permissions
 - **Existing Azure Landing Zone** resource group
+
+> GitHub Actions uses the immutable OIDC subject format `repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV`, and Azure matches that string exactly. Run `initial-azure-setup.sh` once per GitHub environment you intend to deploy to (`dev`, `test`, `prod`, `tools`). If you previously ran the script and are now seeing `AADSTS700213`, re-run it for each environment to refresh the federated credential subject.
 
 #### Initial Setup for GHA and Terraform 
 
@@ -679,8 +681,8 @@ Error: No subscription found. Run 'az account set' to select a subscription.
 
 **Solution**: 
 - Verify `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets
-- Ensure managed identity has proper federated credentials
-- Check that repository URL matches federated identity configuration
+- Ensure managed identity has proper federated credentials for the immutable GitHub OIDC subject format `repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV`
+- Re-run `initial-azure-setup.sh` once for each GitHub environment (`dev`, `test`, `prod`, `tools`) if you see `AADSTS700213`
 
 #### 2. Terraform State Issues
 

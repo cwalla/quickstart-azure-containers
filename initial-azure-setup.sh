@@ -43,13 +43,21 @@
 # - Appropriate permissions in Azure subscription (Owner of security group DO_PuC_Azure_Live_{LicensePlate}_Contributor)
 #   By Default, the Product Owner in Registry is the Owner of the security group. The PO needs to add other tech leads as owners who will run this script.
 #
-# GitHub Requirements (optional):
-# - GitHub CLI installed (for auto secret creation with --create-github-secrets)
+# GitHub Requirements:
+# - GitHub CLI installed (required to resolve immutable OIDC subjects and for auto secret creation with --create-github-secrets)
 # - Repository admin permissions (if using --create-github-secrets)
 #   Required GitHub token scopes:
 #   • repo (full repository access)
 #   • admin:repo_hook (if using webhooks)
 #   • admin:org (if repository is in an organization)
+#
+# OIDC Subject Note:
+# - GitHub Actions uses the immutable OIDC subject format:
+#   repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV
+# - Azure matches this subject exactly, so run this script once per GitHub
+#   environment you deploy to (dev, test, prod, tools)
+# - If you previously ran this script and are hitting AADSTS700213, re-run it
+#   for each environment to refresh the federated credential subject
 #
 # Important Post-Setup Action (If You are not an Owner of the security group):
 # After running this setup script, a project lead must manually add the newly
@@ -222,7 +230,7 @@ NOTES:
     • Security group will be auto-detected from resource group name (license plate extraction)
     • Storage account names are auto-generated as: tfstate{repo}{env} (sanitized)
     • Use --dry-run first to preview what will be created
-    • Requires Azure CLI logged in and GitHub CLI (optional) for auto-secrets
+    • Requires Azure CLI logged in and GitHub CLI for immutable OIDC subject resolution
     • User must be owner of security group for automatic assignment
 
 =============================================================================
@@ -902,15 +910,58 @@ add_to_security_group() {
 
 
 # ================================================================================
+# Resolve the numeric GitHub owner and repository IDs used in the immutable
+# OIDC subject claim: repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV
+# ================================================================================
+resolve_github_ids() {
+    GITHUB_OWNER=$(echo "$GITHUB_REPO" | cut -d'/' -f1)
+    REPO_NAME_WITHOUT_OWNER=$(echo "$GITHUB_REPO" | cut -d'/' -f2)
+
+    GITHUB_REPO_ID=""
+    GITHUB_OWNER_ID=""
+
+    if ! command_exists gh; then
+        log_warning "GitHub CLI (gh) is required to resolve immutable GitHub OIDC subject IDs."
+        return 1
+    fi
+
+    set +e
+    GITHUB_REPO_ID=$(gh api "repos/$GITHUB_REPO" --jq '.id' 2>/dev/null)
+    GITHUB_OWNER_ID=$(gh api "repos/$GITHUB_REPO" --jq '.owner.id' 2>/dev/null)
+    set -e
+
+    if [[ -z "$GITHUB_REPO_ID" || -z "$GITHUB_OWNER_ID" ]]; then
+        log_warning "Unable to resolve numeric GitHub owner/repository IDs for '$GITHUB_REPO'."
+        return 1
+    fi
+
+    log_info "Resolved GitHub owner ID: $GITHUB_OWNER_ID, repository ID: $GITHUB_REPO_ID"
+    return 0
+}
+
+# ================================================================================
 # Create federated identity credentials for GitHub Actions OIDC authentication
+#
+# GitHub Actions uses the immutable OIDC subject format:
+#   repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV
+# Azure matches this string exactly, so run this setup once per GitHub
+# environment you deploy to. If you see AADSTS700213 after using an older
+# version of this script, re-run it for each environment to refresh the subject.
 # ================================================================================
 create_federated_credentials() {
     log_info "Creating federated identity credentials for GitHub Actions OIDC..."
     
-    # Always create subject claim for environment-specific deployments
-    SUBJECT="repo:$GITHUB_REPO:environment:$GITHUB_ENVIRONMENT"
     REPO_NAME_WITHOUT_OWNER=$(echo "$GITHUB_REPO" | cut -d'/' -f2)
     CREDENTIAL_NAME="$REPO_NAME_WITHOUT_OWNER-$GITHUB_ENVIRONMENT"
+
+    if resolve_github_ids; then
+        SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${REPO_NAME_WITHOUT_OWNER}@${GITHUB_REPO_ID}:environment:${GITHUB_ENVIRONMENT}"
+    else
+        log_error "Unable to build the immutable GitHub Actions OIDC subject for '$GITHUB_REPO'."
+        log_error "Install/authenticate GitHub CLI, then verify the numeric IDs with:"
+        log_error "  gh api repos/$GITHUB_REPO --jq '{owner_id: .owner.id, repo_id: .id}'"
+        exit 1
+    fi
     
     # GitHub Actions OIDC issuer and audience
     ISSUER="https://token.actions.githubusercontent.com"
@@ -922,8 +973,20 @@ create_federated_credentials() {
     
     # Check if federated credential already exists
     if [[ "$DRY_RUN" == "false" ]]; then
-        if az identity federated-credential show --name "$CREDENTIAL_NAME" --identity-name "$IDENTITY_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
-            log_warning "Federated credential '$CREDENTIAL_NAME' already exists. Updating..."
+        local existing_subject=""
+        set +e
+        existing_subject=$(az identity federated-credential show --name "$CREDENTIAL_NAME" --identity-name "$IDENTITY_NAME" --resource-group "$RESOURCE_GROUP" --query "subject" --output tsv 2>/dev/null)
+        set -e
+
+        if [[ -n "$existing_subject" ]]; then
+            if [[ "$existing_subject" == "$SUBJECT" ]]; then
+                log_success "Federated credential '$CREDENTIAL_NAME' already has the correct subject."
+                return 0
+            fi
+
+            log_warning "Federated credential '$CREDENTIAL_NAME' has a different subject."
+            log_warning "Current subject:  $existing_subject"
+            log_warning "Required subject: $SUBJECT"
             execute_command "az identity federated-credential update --name '$CREDENTIAL_NAME' --identity-name '$IDENTITY_NAME' --resource-group '$RESOURCE_GROUP' --issuer '$ISSUER' --subject '$SUBJECT' --audience '$AUDIENCE'" \
                 "Updating federated identity credential"
         else
