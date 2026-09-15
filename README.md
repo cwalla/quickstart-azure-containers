@@ -681,8 +681,8 @@ Error: No subscription found. Run 'az account set' to select a subscription.
 
 **Solution**: 
 - Verify `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets
-- Ensure managed identity has proper federated credentials for the immutable GitHub OIDC subject format `repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV`
-- Re-run `initial-azure-setup.sh` once for each GitHub environment (`dev`, `test`, `prod`, `tools`) if you see `AADSTS700213`
+- Check whether the repository currently emits a legacy or immutable OIDC subject, using GitHub's OIDC subject preview, and ensure the managed identity has a matching federated credential
+- For an existing repository, add the immutable credential alongside the legacy credential, enable immutable subjects in GitHub, validate a workflow, and only then remove the legacy credential; repeat for each environment (`dev`, `test`, `prod`, `tools`)
 
 #### 2. Terraform State Issues
 
