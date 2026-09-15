@@ -606,14 +606,15 @@ check_and_install_tools() {
         log_success "Terraform found ($(terraform version -json 2>/dev/null | grep -o '"terraform_version":"[^"]*' | cut -d'"' -f4 || echo 'version unknown'))"
     fi
     
-    # Check and optionally install GitHub CLI
+    # Check and install GitHub CLI
     if ! command_exists gh; then
-        log_warning "GitHub CLI not found. It's optional but recommended for auto-secret creation."
+        log_warning "GitHub CLI not found. It's required to resolve immutable OIDC subjects."
         read -p "Install GitHub CLI? (yes/no) " install_gh
         if [[ "$install_gh" == "yes" ]]; then
             install_github_cli
         else
-            log_info "GitHub CLI is optional. You can install it later if needed: https://cli.github.com/"
+            log_error "GitHub CLI is required. Please install it manually from: https://cli.github.com/"
+            exit 1
         fi
     else
         log_success "GitHub CLI found ($(gh version 2>/dev/null | head -1 || echo 'version unknown'))"
@@ -663,6 +664,18 @@ check_prerequisites() {
     local current_user=$(az account show --query "user.name" --output tsv 2>/dev/null || echo "Unknown")
     log_info "Azure CLI authenticated as: $current_user"
     log_info "Current subscription: $current_sub ($current_sub_id)"
+
+    if ! command_exists gh; then
+        log_error "GitHub CLI is required to resolve immutable GitHub OIDC subject IDs."
+        log_error "Please install GitHub CLI from: https://cli.github.com/"
+        exit 1
+    fi
+
+    if ! gh api "repos/$GITHUB_REPO" &> /dev/null; then
+        log_error "Unable to access GitHub repository '$GITHUB_REPO' via GitHub CLI."
+        log_error "Please run 'gh auth login' and verify you have access to the repository."
+        exit 1
+    fi
     
     log_success "Prerequisites check passed"
 }
